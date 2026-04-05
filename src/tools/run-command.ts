@@ -1,6 +1,7 @@
 import { execa } from "execa";
 import { z } from "zod";
 import { compress } from "../utils/compressor.js";
+import { metrics } from "../utils/metrics.js";
 
 export const runCommandSchema = z.object({
   command: z.string().describe("Shell command to execute"),
@@ -26,13 +27,16 @@ export async function runCommand(args: z.infer<typeof runCommandSchema>) {
   }
 
   const { output, originalLines, compressedLines } = compress(rawOutput);
+  const savedLines = originalLines - compressedLines;
+
+  metrics.addCall({ command, originalLines, compressedLines, savedLines });
 
   return {
     success,
     output,
     originalLines,
     compressedLines,
-    savedLines: originalLines - compressedLines,
+    savedLines,
     command,
   };
 }
