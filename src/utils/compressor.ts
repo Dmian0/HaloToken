@@ -1,4 +1,5 @@
-const IMPORTANT_PATTERNS = /error|warning|warn|failed|exception|cannot|not found|undefined/i;
+const IMPORTANT_PATTERNS =
+  /error|warning|warn|failed|exception|cannot|not found|undefined|error CS|warning CS|Build FAILED|Unhandled exception|at |Exception:|NullReferenceException|Object reference/i;
 
 export function compress(raw: string): { output: string; originalLines: number; compressedLines: number } {
   const allLines = raw.split("\n");

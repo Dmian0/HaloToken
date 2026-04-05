@@ -1,5 +1,6 @@
 import { execa } from "execa";
 import { readFile } from "fs/promises";
+import { glob } from "fs/promises";
 import { join } from "path";
 import { z } from "zod";
 import { compress } from "../utils/compressor.js";
@@ -8,15 +9,17 @@ export const getBuildErrorsSchema = z.object({
   projectPath: z.string().describe("Path to the project to analyze"),
 });
 
-interface TsError   { file: string; line: string; code: string; message: string }
-interface PyError   { file: string; line: string; message: string }
-interface GenError  { message: string; raw: string }
+interface TsError     { file: string; line: string; code: string; message: string }
+interface PyError     { file: string; line: string; message: string }
+interface DotnetError { file: string; line: string; column: string; code: string; message: string; severity: "error" | "warning" }
+interface GenError    { message: string; raw: string }
 
 async function detectStack(projectPath: string): Promise<
   | { stack: "typescript"; command: string }
   | { stack: "node";       command: string }
   | { stack: "python";     command: string }
   | { stack: "rust";       command: string }
+  | { stack: "dotnet";     command: string }
   | { stack: "unknown";    error: string }
 > {
   const has = async (file: string) => {
@@ -24,8 +27,17 @@ async function detectStack(projectPath: string): Promise<
     catch { return false; }
   };
 
+  // Busca .csproj o .sln (pueden tener cualquier nombre)
+  const hasDotnet = async () => {
+    try {
+      for await (const _ of glob("*.{csproj,sln}", { cwd: projectPath })) return true;
+      return false;
+    } catch { return false; }
+  };
+
   if (await has("Cargo.toml"))       return { stack: "rust",   command: "cargo check 2>&1" };
   if (await has("requirements.txt")) return { stack: "python", command: "python -m py_compile *.py" };
+  if (await hasDotnet())             return { stack: "dotnet", command: "dotnet build 2>&1" };
 
   if (await has("package.json")) {
     const raw = await readFile(join(projectPath, "package.json"), "utf-8");
@@ -40,7 +52,6 @@ async function detectStack(projectPath: string): Promise<
 
 function parseTsErrors(output: string): TsError[] {
   const errors: TsError[] = [];
-  // e.g. "src/index.ts(5,3): error TS2345: Argument..."
   const re = /^(.+?)\((\d+),\d+\):\s+error\s+(TS\d+):\s+(.+)$/gm;
   for (const m of output.matchAll(re)) {
     errors.push({ file: m[1], line: m[2], code: m[3], message: m[4] });
@@ -50,7 +61,6 @@ function parseTsErrors(output: string): TsError[] {
 
 function parsePyErrors(output: string): PyError[] {
   const errors: PyError[] = [];
-  // e.g. "  File "foo.py", line 3"  followed by SyntaxError on next line
   const fileRe = /File "(.+?)",\s+line\s+(\d+)/g;
   const syntaxRe = /SyntaxError:\s+(.+)/g;
   const files = [...output.matchAll(fileRe)];
@@ -58,6 +68,38 @@ function parsePyErrors(output: string): PyError[] {
   for (let i = 0; i < files.length; i++) {
     errors.push({ file: files[i][1], line: files[i][2], message: synErrs[i]?.[1] ?? "SyntaxError" });
   }
+  return errors;
+}
+
+function parseDotnetErrors(output: string): DotnetError[] {
+  const errors: DotnetError[] = [];
+  // e.g. "src/Foo.cs(12,5): error CS0103: The name 'bar' does not exist"
+  const re = /^(.+?)\((\d+),(\d+)\):\s+(error|warning)\s+(CS\d+):\s+(.+)$/gm;
+  for (const m of output.matchAll(re)) {
+    errors.push({
+      file: m[1].trim(),
+      line: m[2],
+      column: m[3],
+      severity: m[4] as "error" | "warning",
+      code: m[5],
+      message: m[6],
+    });
+  }
+
+  // Tests fallidos: líneas con "FAILED" o "failed"
+  for (const line of output.split("\n")) {
+    if (/\bFAILED\b/.test(line) && !errors.some((e) => e.message === line.trim())) {
+      errors.push({ file: "", line: "", column: "", severity: "error", code: "TEST", message: line.trim() });
+    }
+  }
+
+  // Errores de runtime: "Error" al inicio o "Unhandled exception"
+  for (const line of output.split("\n")) {
+    if (/^(Error\b|Unhandled exception)/.test(line.trim())) {
+      errors.push({ file: "", line: "", column: "", severity: "error", code: "RUNTIME", message: line.trim() });
+    }
+  }
+
   return errors;
 }
 
@@ -88,10 +130,11 @@ export async function getBuildErrors(args: z.infer<typeof getBuildErrorsSchema>)
     rawOutput = e.all ?? e.message ?? String(err);
   }
 
-  let errors: TsError[] | PyError[] | GenError[];
-  if (stack === "typescript") errors = parseTsErrors(rawOutput);
-  else if (stack === "python")  errors = parsePyErrors(rawOutput);
-  else                          errors = parseGenericErrors(rawOutput);
+  let errors: TsError[] | PyError[] | DotnetError[] | GenError[];
+  if (stack === "typescript")  errors = parseTsErrors(rawOutput);
+  else if (stack === "python") errors = parsePyErrors(rawOutput);
+  else if (stack === "dotnet") errors = parseDotnetErrors(rawOutput);
+  else                         errors = parseGenericErrors(rawOutput);
 
   const { output: buildOutput } = compress(rawOutput);
 
