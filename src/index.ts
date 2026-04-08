@@ -21,6 +21,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
         type: "object",
         properties: {
           command: { type: "string", description: "Shell command to execute" },
+          env: { type: "object", description: "Additional environment variables", additionalProperties: { type: "string" } },
         },
         required: ["command"],
       },
@@ -54,6 +55,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
             type: "string",
             description: "dotnet command to run (default: dotnet watch run)",
           },
+          env: { type: "object", description: "Additional environment variables", additionalProperties: { type: "string" } },
         },
         required: ["projectPath"],
       },
