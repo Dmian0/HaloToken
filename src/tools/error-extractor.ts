@@ -11,8 +11,9 @@ export const getBuildErrorsSchema = z.object({
 
 interface TsError     { file: string; line: string; code: string; message: string }
 interface PyError     { file: string; line: string; message: string }
-interface DotnetError { file: string; line: string; column: string; code: string; message: string; severity: "error" | "warning" }
-interface GenError    { message: string; raw: string }
+interface DotnetError   { file: string; line: string; column: string; code: string; message: string; severity: "error" | "warning" }
+interface DotnetWarning { file: string; line: string; code: string; message: string; raw: string }
+interface GenError      { message: string; raw: string }
 
 async function detectStack(projectPath: string): Promise<
   | { stack: "typescript"; command: string }
@@ -71,36 +72,72 @@ function parsePyErrors(output: string): PyError[] {
   return errors;
 }
 
-function parseDotnetErrors(output: string): DotnetError[] {
+function parseDotnetErrors(output: string): { errors: DotnetError[]; warnings: DotnetWarning[] } {
   const errors: DotnetError[] = [];
+  const warnings: DotnetWarning[] = [];
+  const seenWarnings = new Set<string>();
+
+  const addWarning = (w: DotnetWarning) => {
+    // Deduplicate by raw line (dotnet emits same warning in restore + build phases)
+    if (seenWarnings.has(w.raw)) return;
+    seenWarnings.add(w.raw);
+    warnings.push(w);
+  };
+
+  // Compilation errors/warnings with file location and CS code
   // e.g. "src/Foo.cs(12,5): error CS0103: The name 'bar' does not exist"
-  const re = /^(.+?)\((\d+),(\d+)\):\s+(error|warning)\s+(CS\d+):\s+(.+)$/gm;
-  for (const m of output.matchAll(re)) {
-    errors.push({
+  const csRe = /^(.+?)\((\d+),(\d+)\):\s+(error|warning)\s+(CS\d+):\s+(.+)$/gm;
+  for (const m of output.matchAll(csRe)) {
+    const entry = {
       file: m[1].trim(),
       line: m[2],
       column: m[3],
       severity: m[4] as "error" | "warning",
       code: m[5],
       message: m[6],
-    });
+    };
+    if (entry.severity === "error") {
+      errors.push(entry);
+    } else {
+      addWarning({ file: entry.file, line: entry.line, code: entry.code, message: entry.message, raw: m[0] });
+    }
   }
 
-  // Tests fallidos: líneas con "FAILED" o "failed"
+  // SDK warnings with file location
+  // e.g. ".../targets(32,5): warning NETSDK1138: The target framework..."
+  const sdkLocRe = /^(.+?)\((\d+),\d+\):\s+warning\s+(NETSDK\d+):\s+(.+)$/gm;
+  for (const m of output.matchAll(sdkLocRe)) {
+    addWarning({ file: m[1].trim(), line: m[2], code: m[3], message: m[4], raw: m[0] });
+  }
+
+  // NuGet/SDK warnings without file location (path : warning CODE: message)
+  // e.g. "Avents.csproj : warning NU1902: Package 'Azure.Identity'..."
+  const nuRe = /^(.+?)\s*:\s*warning\s+(NU\d+|NETSDK\d+):\s+(.+)$/gm;
+  for (const m of output.matchAll(nuRe)) {
+    addWarning({ file: m[1].trim(), line: "", code: m[2], message: m[3], raw: m[0] });
+  }
+
+  // Generic warnings (filepath(line,col): warning : message) — no code
+  const genWarnRe = /^(.+?)\((\d+),\d+\):\s+warning\s*:\s+(.+)$/gm;
+  for (const m of output.matchAll(genWarnRe)) {
+    addWarning({ file: m[1].trim(), line: m[2], code: "", message: m[3], raw: m[0] });
+  }
+
+  // Tests fallidos
   for (const line of output.split("\n")) {
     if (/\bFAILED\b/.test(line) && !errors.some((e) => e.message === line.trim())) {
       errors.push({ file: "", line: "", column: "", severity: "error", code: "TEST", message: line.trim() });
     }
   }
 
-  // Errores de runtime: "Error" al inicio o "Unhandled exception"
+  // Errores de runtime
   for (const line of output.split("\n")) {
     if (/^(Error\b|Unhandled exception)/.test(line.trim())) {
       errors.push({ file: "", line: "", column: "", severity: "error", code: "RUNTIME", message: line.trim() });
     }
   }
 
-  return errors;
+  return { errors, warnings };
 }
 
 function parseGenericErrors(output: string): GenError[] {
@@ -131,9 +168,15 @@ export async function getBuildErrors(args: z.infer<typeof getBuildErrorsSchema>)
   }
 
   let errors: TsError[] | PyError[] | DotnetError[] | GenError[];
+  let warnings: DotnetWarning[] = [];
+
   if (stack === "typescript")  errors = parseTsErrors(rawOutput);
   else if (stack === "python") errors = parsePyErrors(rawOutput);
-  else if (stack === "dotnet") errors = parseDotnetErrors(rawOutput);
+  else if (stack === "dotnet") {
+    const parsed = parseDotnetErrors(rawOutput);
+    errors = parsed.errors;
+    warnings = parsed.warnings;
+  }
   else                         errors = parseGenericErrors(rawOutput);
 
   const { output: buildOutput } = compress(rawOutput);
@@ -142,8 +185,11 @@ export async function getBuildErrors(args: z.infer<typeof getBuildErrorsSchema>)
     stack,
     projectPath,
     hasErrors: errors.length > 0,
+    hasWarnings: warnings.length > 0,
     totalErrors: errors.length,
+    totalWarnings: warnings.length,
     errors,
+    warnings,
     buildOutput,
   };
 }
