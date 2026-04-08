@@ -5,6 +5,7 @@ import { runCommand, runCommandSchema } from "./tools/run-command.js";
 import { getSessionReport } from "./tools/session-report.js";
 import { getBuildErrors, getBuildErrorsSchema } from "./tools/error-extractor.js";
 import { watchDotnet, watchDotnetSchema } from "./tools/dotnet-watcher.js";
+import { readFragment, readFragmentSchema } from "./tools/file-reader.js";
 
 const server = new Server(
   { name: "halotoken", version: "0.1.0" },
@@ -60,6 +61,21 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
         required: ["projectPath"],
       },
     },
+    {
+      name: "read_fragment",
+      description:
+        "Reads a specific fragment of a file based on a query (function name, class name, or keyword), returning only the relevant lines with context to minimize token usage.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          filePath: { type: "string", description: "Absolute or relative path to the file" },
+          query: { type: "string", description: "What to search for: function name, class name, or keyword" },
+          contextLines: { type: "number", description: "Lines of context above/below match (default: 5)" },
+          maxLines: { type: "number", description: "Maximum lines to return (default: 100)" },
+        },
+        required: ["filePath", "query"],
+      },
+    },
   ],
 }));
 
@@ -81,6 +97,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   if (request.params.name === "watch_dotnet") {
     const args = watchDotnetSchema.parse(request.params.arguments);
     const result = await watchDotnet(args);
+    return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+  }
+  if (request.params.name === "read_fragment") {
+    const args = readFragmentSchema.parse(request.params.arguments);
+    const result = await readFragment(args);
     return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
   }
   throw new Error(`Unknown tool: ${request.params.name}`);
